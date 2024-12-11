@@ -9,6 +9,8 @@
 #include <iostream>
 #include <chrono>
 #include <ctime>
+#include <thread>
+#include <future>
 
 color ray_color(const ray &r, const hittable &world, int depth)
 {
@@ -88,24 +90,48 @@ hittable_list random_scene()
 	return world;
 }
 
+void getPixelColor(const int samples_per_pixel, int i, const int image_width, int j, const int image_height, camera &cam, color &pixel_color, hittable_list &world, const int max_bounces)
+{
+	for (int s = 0; s < samples_per_pixel; s++)
+	{
+		auto u = (i + random_double()) / (image_width - 1);
+		auto v = (j + random_double()) / (image_height - 1);
+		ray r = cam.get_ray(u, v);
+		pixel_color += ray_color(r, world, max_bounces);
+	}
+}
+
+auto renderLines(const int startLine, const int endLine, const int image_height, const int image_width, const int samples_per_pixel, const int max_bounces, camera cam, hittable_list world)
+{
+	std::vector<color> image(image_width * (endLine - startLine), color(0, 0, 0));
+
+	for (int y = endLine - 1; y >= startLine; --y)
+	{
+		for (int x = image_width - 1; x >= 0; --x)
+		{
+			getPixelColor(samples_per_pixel, x, image_width, y, image_height, cam, image[(y - startLine) * image_width + (image_width - x - 1)], world, max_bounces);
+		}
+	}
+
+	return image;
+}
+
 int main()
 {
 	auto start = std::chrono::system_clock::now();
 
 	// Image
-
 	const auto aspect_ratio = 3.0 / 2.0;
 	const int image_width = 1200;
 	const int image_height = static_cast<int>(image_width / aspect_ratio);
-	const int samples_per_pixel = 10;
+	const int threadCount = 16;
+	const int samples_per_pixel = 100;
 	const int max_bounces = 6;
 
 	// World
-
 	auto world = random_scene();
 
 	// Camera
-
 	point3 lookfrom(13, 2, 3);
 	point3 lookat(0, 0, 0);
 	vec3 vup(0, 1, 0);
@@ -114,30 +140,31 @@ int main()
 
 	camera cam(lookfrom, lookat, vup, 20, aspect_ratio, aperture, dist_to_focus);
 
-	// Render
+	// Render multithreaded
+	const int linesPerThread = image_height / threadCount;
+	std::vector<std::future<std::vector<color>>> threads(threadCount);
+	for (int t = 0; t < threadCount - 1; t++)
+	{
+		threads[t] = std::async(renderLines, t * linesPerThread, (t + 1) * linesPerThread, image_height, image_width, samples_per_pixel, max_bounces, cam, world);
+	}
+	threads[threadCount - 1] = std::async(renderLines, (threadCount - 1) * linesPerThread, image_height, image_height, image_width, samples_per_pixel, max_bounces, cam, world);
+
+	// Output
 	std::cout << "P3\n"
 			  << image_width << " " << image_height << "\n255\n";
-
-	for (int j = image_height - 1; j >= 0; --j)
+	for (int t = threadCount - 1; t >= 0; --t)
 	{
-		std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
-		for (int i = 0; i < image_width; ++i)
+		auto imagePart = threads[t].get();
+
+		for (int i = imagePart.size() - 1; i >= 0; --i)
 		{
-			color pixel_color(0, 0, 0);
-			for (int s = 0; s < samples_per_pixel; s++)
-			{
-				auto u = (i + random_double()) / (image_width - 1);
-				auto v = (j + random_double()) / (image_height - 1);
-				ray r = cam.get_ray(u, v);
-				pixel_color += ray_color(r, world, max_bounces);
-			}
-			write_color(std::cout, pixel_color, samples_per_pixel);
+			write_color(std::cout, imagePart[i], samples_per_pixel);
 		}
 	}
 
 	std::cerr << "\nDone.\n";
 
-	// Some computation here
+	// Statistics
 	auto end = std::chrono::system_clock::now();
 
 	std::chrono::duration<double> elapsed_seconds = end - start;
